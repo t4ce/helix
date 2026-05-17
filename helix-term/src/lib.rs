@@ -75,8 +75,19 @@ fn filter_picker_entry(entry: &DirEntry, root: &Path, dedup_symlinks: bool) -> b
 fn open_external_url_callback(
     url: Url,
 ) -> impl Future<Output = Result<job::Callback, anyhow::Error>> + Send + 'static {
+    #[cfg(target_os = "trueos")]
+    let commands = [url.to_string()];
+    #[cfg(not(target_os = "trueos"))]
     let commands = open::commands(url.as_str());
-    async {
+    async move {
+        #[cfg(target_os = "trueos")]
+        for url in commands {
+            let mut command = tokio::process::Command::new("trueos-open");
+            if command.arg(url.as_str()).status().await.is_ok() {
+                return Ok(job::Callback::Editor(Box::new(|_| {})));
+            }
+        }
+        #[cfg(not(target_os = "trueos"))]
         for cmd in commands {
             let mut command: tokio::process::Command = cmd.into();
             if command.status().await.is_ok() {

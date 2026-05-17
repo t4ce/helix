@@ -6496,8 +6496,7 @@ async fn shell_impl_async(
     cmd: &str,
     input: Option<Rope>,
 ) -> anyhow::Result<Tendril> {
-    use std::process::Stdio;
-    use tokio::process::Command;
+    use tokio::process::{Command, Stdio};
     ensure!(!shell.is_empty(), "No shell set");
 
     let mut process = Command::new(&shell[0]);

@@ -861,13 +861,19 @@ impl Document {
                 self.display_name(),
                 fmt_cmd.display(),
             );
-            use std::process::Stdio;
+            use tokio::process::Stdio;
             let text = self.text().clone();
 
+            #[cfg(target_os = "trueos")]
+            let mut process = tokio::process::Command::new(fmt_cmd.to_string_lossy().as_ref());
+            #[cfg(not(target_os = "trueos"))]
             let mut process = tokio::process::Command::new(&fmt_cmd);
 
             if let Some(doc_dir) = self.path.as_ref().and_then(|path| path.parent()) {
+                #[cfg(not(target_os = "trueos"))]
                 process.current_dir(doc_dir);
+                #[cfg(target_os = "trueos")]
+                let _ = doc_dir;
             }
 
             let args = match fmt_args
@@ -893,7 +899,17 @@ impl Document {
                     .spawn()
                     .map_err(|e| FormatterError::SpawningFailed {
                         command: fmt_cmd.to_string_lossy().into(),
-                        error: e.kind(),
+                        error: {
+                            #[cfg(target_os = "trueos")]
+                            {
+                                let _ = &e;
+                                io::ErrorKind::Other
+                            }
+                            #[cfg(not(target_os = "trueos"))]
+                            {
+                                e.kind()
+                            }
+                        },
                     })?;
 
                 let mut stdin = process.stdin.take().ok_or(FormatterError::BrokenStdin)?;
@@ -1022,7 +1038,8 @@ impl Document {
         let last_saved_time = self.last_saved_time;
 
         // We encode the file according to the `Document`'s encoding.
-        let future = async move {
+            let future = async move {
+            #[cfg(not(target_os = "trueos"))]
             use tokio::fs;
             if let Some(parent) = path.parent() {
                 // TODO: display a prompt asking the user if the directories should be created
@@ -1037,6 +1054,15 @@ impl Document {
 
             // Protect against overwriting changes made externally
             if !force {
+                #[cfg(target_os = "trueos")]
+                if let Ok(metadata) = std::fs::metadata(&path) {
+                    if let Ok(mtime) = metadata.modified() {
+                        if last_saved_time < mtime {
+                            bail!("file modified by an external process, use :w! to overwrite");
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "trueos"))]
                 if let Ok(metadata) = fs::metadata(&path).await {
                     if let Ok(mtime) = metadata.modified() {
                         if last_saved_time < mtime {
@@ -1045,6 +1071,18 @@ impl Document {
                     }
                 }
             }
+            #[cfg(target_os = "trueos")]
+            let write_path = std::fs::read_link(&path)
+                .ok()
+                .and_then(|p| {
+                    if p.is_relative() {
+                        path.parent().map(|parent| parent.join(p))
+                    } else {
+                        Some(p)
+                    }
+                })
+                .unwrap_or_else(|| path.clone());
+            #[cfg(not(target_os = "trueos"))]
             let write_path = tokio::fs::read_link(&path)
                 .await
                 .ok()
@@ -1066,6 +1104,13 @@ impl Document {
 
             // Assume it is a hardlink to prevent data loss if the metadata cant be read (e.g. on certain Windows configurations)
             let is_hardlink = helix_stdx::faccess::hardlink_count(&write_path).unwrap_or(2) > 1;
+            #[cfg(target_os = "trueos")]
+            let is_symlink = match std::fs::symlink_metadata(&write_path) {
+                Ok(meta) => meta.is_symlink(),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+                Err(err) => return Err(err.into()),
+            };
+            #[cfg(not(target_os = "trueos"))]
             let is_symlink = match tokio::fs::symlink_metadata(&write_path).await {
                 Ok(meta) => meta.is_symlink(),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
@@ -1105,10 +1150,16 @@ impl Document {
             };
 
             let write_result: anyhow::Result<_> = async {
+                #[cfg(target_os = "trueos")]
+                let mut dst = tokio::fs::File::create(write_path.to_string_lossy().as_ref()).await?;
+                #[cfg(not(target_os = "trueos"))]
                 let mut dst = tokio::fs::File::create(&write_path).await?;
                 to_writer(&mut dst, encoding_with_bom_info, &text).await?;
                 // Ignore ENOTSUP/EOPNOTSUPP (Operation not supported) errors from sync_all()
                 // This is known to occur on SMB filesystems on macOS where fsync is not supported
+                #[cfg(target_os = "trueos")]
+                let _ = dst.sync_all().await;
+                #[cfg(not(target_os = "trueos"))]
                 match dst.sync_all().await {
                     Ok(_) => (),
                     Err(err) if err.kind() == io::ErrorKind::Unsupported => (),
@@ -1127,6 +1178,12 @@ impl Document {
             }
             .await;
 
+            #[cfg(target_os = "trueos")]
+            let save_time = match std::fs::metadata(&write_path) {
+                Ok(metadata) => metadata.modified().unwrap_or_else(|_| SystemTime::now()),
+                Err(_) => SystemTime::now(),
+            };
+            #[cfg(not(target_os = "trueos"))]
             let save_time = match fs::metadata(&write_path).await {
                 Ok(metadata) => metadata.modified().map_or(SystemTime::now(), |mtime| mtime),
                 Err(_) => SystemTime::now(),
@@ -1137,7 +1194,18 @@ impl Document {
                     let mut delete = true;
                     if write_result.is_err() {
                         // Restore backup
-                        let _ = tokio::fs::copy(&backup, &write_path).await.map_err(|e| {
+                        #[cfg(target_os = "trueos")]
+                        let backup_path = backup.to_string_lossy().into_owned();
+                        #[cfg(target_os = "trueos")]
+                        let write_path_str = write_path.to_string_lossy().into_owned();
+                        #[cfg(target_os = "trueos")]
+                        let restore = tokio::fs::copy(
+                            backup_path.as_str(),
+                            write_path_str.as_str(),
+                        );
+                        #[cfg(not(target_os = "trueos"))]
+                        let restore = tokio::fs::copy(&backup, &write_path);
+                        let _ = restore.await.map_err(|e| {
                             delete = false;
                             log::error!("Failed to restore backup on write failure: {e}")
                         });
@@ -1145,13 +1213,30 @@ impl Document {
 
                     if delete {
                         // Delete backup
-                        let _ = tokio::fs::remove_file(backup)
+                        #[cfg(target_os = "trueos")]
+                        let backup_path = backup.to_string_lossy().into_owned();
+                        #[cfg(target_os = "trueos")]
+                        let remove_backup = tokio::fs::remove_file(backup_path.as_str());
+                        #[cfg(not(target_os = "trueos"))]
+                        let remove_backup = tokio::fs::remove_file(backup);
+                        let _ = remove_backup
                             .await
                             .map_err(|e| log::error!("Failed to remove backup file on write: {e}"));
                     }
                 } else if write_result.is_err() {
                     // restore backup
-                    let _ = tokio::fs::rename(&backup, &write_path)
+                    #[cfg(target_os = "trueos")]
+                    let backup_path = backup.to_string_lossy().into_owned();
+                    #[cfg(target_os = "trueos")]
+                    let write_path_str = write_path.to_string_lossy().into_owned();
+                    #[cfg(target_os = "trueos")]
+                    let restore = tokio::fs::rename(
+                        backup_path.as_str(),
+                        write_path_str.as_str(),
+                    );
+                    #[cfg(not(target_os = "trueos"))]
+                    let restore = tokio::fs::rename(&backup, &write_path);
+                    let _ = restore
                         .await
                         .map_err(|e| log::error!("Failed to restore backup on write failure: {e}"));
                 } else {

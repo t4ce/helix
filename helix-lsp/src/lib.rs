@@ -41,7 +41,14 @@ pub enum Error {
     #[error("failed to parse: {0}")]
     Parse(Box<dyn std::error::Error + Send + Sync>),
     #[error("IO Error: {0}")]
+    #[cfg(not(target_os = "trueos"))]
     IO(#[from] std::io::Error),
+    #[error("IO Error: {0}")]
+    #[cfg(target_os = "trueos")]
+    IO(#[from] tokio::io::Error),
+    #[error("IO Error: {0}")]
+    #[cfg(target_os = "trueos")]
+    StdIO(#[from] std::io::Error),
     #[error("request {0} timed out")]
     Timeout(jsonrpc::Id),
     #[error("server closed the stream")]

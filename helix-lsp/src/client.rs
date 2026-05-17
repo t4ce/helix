@@ -30,10 +30,10 @@ use std::{
     },
 };
 use std::{future::Future, sync::OnceLock};
-use std::{path::Path, process::Stdio};
+use std::path::Path;
 use tokio::{
     io::{BufReader, BufWriter},
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     sync::{
         mpsc::{channel, UnboundedReceiver, UnboundedSender},
         Notify, OnceCell,
@@ -224,13 +224,21 @@ impl Client {
         // Resolve path to the binary
         let cmd = helix_stdx::env::which(cmd)?;
 
-        let process = Command::new(cmd)
-            .envs(server_environment)
+        #[cfg(target_os = "trueos")]
+        let mut command = Command::new(cmd.to_string_lossy().as_ref());
+        #[cfg(not(target_os = "trueos"))]
+        let mut command = Command::new(cmd);
+
+        #[cfg(target_os = "trueos")]
+        let _ = (&server_environment, &root_path);
+        #[cfg(not(target_os = "trueos"))]
+        command.envs(server_environment).current_dir(&root_path);
+
+        let process = command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .current_dir(&root_path)
             // make sure the process is reaped on drop
             .kill_on_drop(true)
             .spawn();

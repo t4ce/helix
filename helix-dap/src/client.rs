@@ -15,13 +15,12 @@ use std::{
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
-    process::Stdio,
     sync::atomic::{AtomicU64, Ordering},
 };
 use tokio::{
     io::{AsyncBufRead, AsyncWrite, BufReader, BufWriter},
     net::TcpStream,
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     sync::mpsc::{channel, unbounded_channel, UnboundedReceiver, UnboundedSender},
     time,
 };
@@ -117,7 +116,12 @@ impl Client {
         // Resolve path to the binary
         let cmd = helix_stdx::env::which(cmd)?;
 
-        let process = Command::new(cmd)
+        #[cfg(target_os = "trueos")]
+        let mut process = Command::new(cmd.to_string_lossy().as_ref());
+        #[cfg(not(target_os = "trueos"))]
+        let mut process = Command::new(cmd);
+
+        let process = process
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
